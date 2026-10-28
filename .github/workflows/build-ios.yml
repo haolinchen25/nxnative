@@ -1,136 +1,72 @@
-name: Build Switch IPA
+name: Build IPA in Fork
 
 on:
   workflow_dispatch:
     inputs:
-      zip_url:
-        description: 'Direct download URL (Gofile, Pixeldrain, Cloudflare Tunnel, or Raw ZIP)'
+      game_url:
+        description: 'Direct download link to your game_input.zip'
         required: true
         type: string
 
 jobs:
   build:
     runs-on: macos-latest
+    timeout-minutes: 180
+
     steps:
-      - name: Checkout repository
+      - name: Checkout Fork
         uses: actions/checkout@v4
 
-      # -----------------------------------------------------------
-      # 1. MASK SENSITIVE INPUTS
-      # -----------------------------------------------------------
-      - name: Protect sensitive inputs
-        env:
-          INPUT_URL: ${{ github.event.inputs.zip_url }}
-        run: |
-          echo "::add-mask::$INPUT_URL"
-          echo "DOWNLOAD_URL=$INPUT_URL" >> $GITHUB_ENV
-
-      # -----------------------------------------------------------
-      # 2. CACHE HOMEBREW DOWNLOADS & INSTALL TOOLS
-      # -----------------------------------------------------------
-      - name: Cache Homebrew Downloads
-        uses: actions/cache@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          path: ~/Library/Caches/Homebrew
-          key: ${{ runner.os }}-brew-v1
-          restore-keys: |
-            ${{ runner.os }}-brew-
+          python-version: '3.12'
 
-      - name: Setup System Dependencies
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: 1
-          HOMEBREW_NO_INSTALL_CLEANUP: 1
-          HOMEBREW_NO_ENV_HINTS: 1
+      - name: Install Toolchain & Dependencies
         run: |
-          MISSING_PKGS=""
-          for cmd in xcodegen zstd spirv-cross glslangValidator; do
-            if ! command -v "$cmd" &>/dev/null; then
-              MISSING_PKGS="$MISSING_PKGS $cmd"
-            fi
-          done
+          xcodebuild -downloadComponent MetalToolchain || true
+          brew install xcodegen zstd spirv-cross glslang
+          brew install --cask dotnet-sdk
+          python3 -m pip install lz4 capstone fonttools "backports.zstd; python_version < '3.14'" nsz
 
-          if [ -n "$MISSING_PKGS" ]; then
-            brew install xcodegen zstd spirv-cross glslang
-          else
-            echo "All required system binaries already present."
+      - name: Download & Extract Game Package
+        run: |
+          mkdir -p workspace/raw workspace/game ~/.switch
+          curl -L "${{ github.event.inputs.game_url }}" -o workspace/input.zip
+          unzip workspace/input.zip -d workspace/raw
+
+          # Copy keys to default switch directory and workspace
+          PROD_KEYS=$(find workspace/raw -iname "*prod.keys*" | head -n 1)
+          if [ -n "$PROD_KEYS" ]; then
+            cp "$PROD_KEYS" ~/.switch/prod.keys
+            cp "$PROD_KEYS" workspace/prod.keys
           fi
 
-      # -----------------------------------------------------------
-      # 3. CACHE PYTHON WHEELS & INSTALL DEPENDENCIES
-      # -----------------------------------------------------------
-      - name: Cache Python Wheels
-        uses: actions/cache@v4
-        with:
-          path: ~/Library/Caches/pip
-          key: ${{ runner.os }}-pip-nxnative-v2
-          restore-keys: |
-            ${{ runner.os }}-pip-nxnative-
-
-      - name: Setup Python Environment
-        run: |
-          python3 -m pip install --upgrade --no-warn-script-location pip uv
-          pip3 install --no-warn-script-location lz4 capstone fonttools backports.zstd nsz requests
-
-      # -----------------------------------------------------------
-      # 4. CACHE XCODE METAL TOOLCHAIN
-      # -----------------------------------------------------------
-      - name: Cache Metal Toolchain
-        id: cache-metal
-        uses: actions/cache@v4
-        with:
-          path: ~/Library/Caches/com.apple.dt.xcodebuild
-          key: ${{ runner.os }}-metal-toolchain-v2
-
-      - name: Configure Xcode & Metal
-        run: |
-          sudo xcode-select -s /Applications/Xcode.app
-          if [ "${{ steps.cache-metal.outputs.cache-hit }}" != "true" ]; then
-            xcodebuild -downloadComponent MetalToolchain || true
+          TITLE_KEYS=$(find workspace/raw -iname "*title.keys*" | head -n 1)
+          if [ -n "$TITLE_KEYS" ]; then
+            cp "$TITLE_KEYS" ~/.switch/title.keys
           fi
 
-      # -----------------------------------------------------------
-      # 5. UNIVERSAL DOWNLOAD & EXTRACTION (GOFILE / PIXELDRAIN / DIRECT)
-      # -----------------------------------------------------------
-      - name: Download and unpack game files
+          # Copy clean game files without macOS metadata files (__MACOSX)
+          find workspace/raw -not -path '*/.*' -type f \( -iname "*.nsp" -o -iname "*.nsz" -o -iname "*.xci" \) -exec cp {} workspace/game/ \;
+
+      - name: Run Build Script
         run: |
-          mkdir -p input_files keys temp_zip
+          python3 scripts/build_ipa_from_nsp.py workspace/game -k workspace/prod.keys --allow-other-metal
 
-          # Normalize Pixeldrain URLs automatically (converts /u/ to direct /api/file/)
-          CLEAN_URL=$(echo "$DOWNLOAD_URL" | sed 's|pixeldrain.com/u/|pixeldrain.com/api/file/|g')
-
-          if [[ "$CLEAN_URL" == *"gofile.io/d/"* ]]; then
-            echo "Detected Gofile folder link. Running automated downloader..."
-            export GF_DOWNLOAD_DIR="./temp_zip"
-            export GF_INTERACTIVE="0"
-            uv run --with requests --with tqdm https://raw.githubusercontent.com/ltsdw/gofile-downloader/main/gofile-downloader.py "$CLEAN_URL"
-          else
-            echo "Downloading direct archive stream..."
-            curl -fSL "$CLEAN_URL" -o temp_zip/package.zip
+      - name: Locate Output IPA
+        id: find_ipa
+        run: |
+          IPA_FILE=$(find workspace -name "*.ipa" | head -n 1)
+          if [ -z "$IPA_FILE" ]; then
+            IPA_FILE=$(find . -name "*.ipa" | head -n 1)
           fi
+          echo "Output IPA: $IPA_FILE"
+          echo "ipa_path=$IPA_FILE" >> $GITHUB_OUTPUT
 
-          # Unpack any ZIP archives found in temp_zip
-          find temp_zip -name "*.zip" -exec unzip -q -o {} -d temp_zip/extracted \;
-          rm -rf temp_zip/*.zip
-
-          # Move keys and game files into working directories
-          find temp_zip -name "*.keys" -exec cp {} keys/prod.keys \;
-          find temp_zip -type f \( -name "*.nsp" -o -name "*.xci" -o -name "*.nsz" \) -exec cp {} input_files/ \;
-          rm -rf temp_zip
-
-      # -----------------------------------------------------------
-      # 6. RUN NXNATIVE CONVERSION
-      # -----------------------------------------------------------
-      - name: Execute nxnative conversion script
-        run: |
-          python3 scripts/build_ipa_from_nsp.py input_files -k keys/prod.keys
-
-      # -----------------------------------------------------------
-      # 7. EXPORT COMPILED IPA
-      # -----------------------------------------------------------
-      - name: Upload temporary artifact
+      - name: Upload Output IPA
         uses: actions/upload-artifact@v4
         with:
-          name: converted-game-ipa
-          path: "**/*.ipa"
-          retention-days: 1
-          compression-level: 0
+          name: built-ipa
+          path: ${{ steps.find_ipa.outputs.ipa_path }}
+          retention-days: 2
