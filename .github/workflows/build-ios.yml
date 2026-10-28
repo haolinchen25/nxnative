@@ -24,31 +24,51 @@ jobs:
 
       - name: Install Toolchain & Dependencies
         run: |
-          brew install xcodegen zstd glslang
+          xcodebuild -downloadComponent MetalToolchain || true
+          brew install xcodegen zstd spirv-cross glslang
           brew install --cask dotnet-sdk
-          pip install lz4 capstone fonttools "backports.zstd; python_version < '3.14'" nsz
+          python3 -m pip install lz4 capstone fonttools "backports.zstd; python_version < '3.14'" nsz
 
-      - name: Download & Extract Game Files
+      - name: Download & Extract Game Package
         run: |
-          mkdir -p workspace
-          curl -L "${{ github.event.inputs.game_url }}" -o workspace/game.zip
-          # Unpacks all files flat into workspace with no subdirectories
-          unzip -j workspace/game.zip -d workspace
+          mkdir -p workspace/raw workspace/game ~/.switch
+          curl -L "${{ github.event.inputs.game_url }}" -o workspace/input.zip
+          unzip workspace/input.zip -d workspace/raw
 
-      - name: Clean Filenames
-        run: |
-          cd workspace
-          # Renames files to replace spaces with underscores
-          for f in *\ *; do [ -f "$f" ] && mv "$f" "${f// /_}"; done
+          # Register prod.keys
+          PROD_KEYS=$(find workspace/raw -iname "*prod.keys*" | head -n 1)
+          if [ -n "$PROD_KEYS" ]; then
+            cp "$PROD_KEYS" ~/.switch/prod.keys
+            cp "$PROD_KEYS" workspace/prod.keys
+          fi
+
+          # Register title.keys
+          TITLE_KEYS=$(find workspace/raw -iname "*title.keys*" | head -n 1)
+          if [ -n "$TITLE_KEYS" ]; then
+            cp "$TITLE_KEYS" ~/.switch/title.keys
+            cp "$TITLE_KEYS" workspace/title.keys
+          fi
+
+          # Move NSP files into workspace/game
+          find workspace/raw -type f \( -iname "*.nsp" -o -iname "*.nsz" -o -iname "*.xci" \) -exec cp {} workspace/game/ \;
 
       - name: Run Build Script
         run: |
-          python3 scripts/build_ipa_from_nsp.py workspace -k workspace/prod.keys
+          PROD_PATH="workspace/prod.keys"
+          TITLE_FLAG=""
+          if [ -f "workspace/title.keys" ]; then
+            TITLE_FLAG="-t workspace/title.keys"
+          fi
+
+          python3 scripts/build_ipa_from_nsp.py workspace/game -k "$PROD_PATH" $TITLE_FLAG
 
       - name: Locate Output IPA
         id: find_ipa
         run: |
           IPA_FILE=$(find workspace -name "*.ipa" | head -n 1)
+          if [ -z "$IPA_FILE" ]; then
+            IPA_FILE=$(find . -name "*.ipa" | head -n 1)
+          fi
           echo "Output IPA: $IPA_FILE"
           echo "ipa_path=$IPA_FILE" >> $GITHUB_OUTPUT
 
@@ -58,4 +78,3 @@ jobs:
           name: built-ipa
           path: ${{ steps.find_ipa.outputs.ipa_path }}
           retention-days: 2
-
