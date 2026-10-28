@@ -35,32 +35,24 @@ jobs:
           curl -L "${{ github.event.inputs.game_url }}" -o workspace/input.zip
           unzip workspace/input.zip -d workspace/raw
 
-          # Register prod.keys
+          # Copy keys to default switch directory and workspace
           PROD_KEYS=$(find workspace/raw -iname "*prod.keys*" | head -n 1)
           if [ -n "$PROD_KEYS" ]; then
             cp "$PROD_KEYS" ~/.switch/prod.keys
             cp "$PROD_KEYS" workspace/prod.keys
           fi
 
-          # Register title.keys
           TITLE_KEYS=$(find workspace/raw -iname "*title.keys*" | head -n 1)
           if [ -n "$TITLE_KEYS" ]; then
             cp "$TITLE_KEYS" ~/.switch/title.keys
-            cp "$TITLE_KEYS" workspace/title.keys
           fi
 
-          # Move NSP files into workspace/game
-          find workspace/raw -type f \( -iname "*.nsp" -o -iname "*.nsz" -o -iname "*.xci" \) -exec cp {} workspace/game/ \;
+          # Copy clean game files without macOS metadata files (__MACOSX)
+          find workspace/raw -not -path '*/.*' -type f \( -iname "*.nsp" -o -iname "*.nsz" -o -iname "*.xci" \) -exec cp {} workspace/game/ \;
 
       - name: Run Build Script
         run: |
-          PROD_PATH="workspace/prod.keys"
-          TITLE_FLAG=""
-          if [ -f "workspace/title.keys" ]; then
-            TITLE_FLAG="-t workspace/title.keys"
-          fi
-
-          python3 scripts/build_ipa_from_nsp.py workspace/game -k "$PROD_PATH" $TITLE_FLAG
+          python3 scripts/build_ipa_from_nsp.py workspace/game -k workspace/prod.keys
 
       - name: Locate Output IPA
         id: find_ipa
