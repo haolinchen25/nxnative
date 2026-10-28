@@ -1,94 +1,57 @@
-name: Build IPA in Fork
+name: Build Switch IPA
 
 on:
   workflow_dispatch:
     inputs:
-      game_url:
-        description: 'Direct download link to your game_input.zip'
+      zip_url:
+        description: 'Direct download URL for game ZIP archive'
         required: true
         type: string
 
 jobs:
   build:
     runs-on: macos-latest
-    timeout-minutes: 180
-
     steps:
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Clone nxnative Repository
-        run: |
-          git clone --recurse-submodules https://github.com/seedds/nxnative.git nxnative_core
-
-      # Cache Homebrew downloads to speed up dependency installs
-      - name: Cache Homebrew
-        uses: actions/cache@v4
-        with:
-          path: ~/Library/Caches/Homebrew
-          key: ${{ runner.os }}-brew-${{ hashFiles('**/install') }}
-          restore-keys: |
-            ${{ runner.os }}-brew-
-
-      - name: Install Toolchain & Dependencies
-        run: |
-          xcodebuild -downloadComponent MetalToolchain || true
-          brew install xcodegen zstd spirv-cross glslang
-          brew install --cask dotnet-sdk
-          python3 -m pip install lz4 capstone fonttools "backports.zstd; python_version < '3.14'" nsz
-
-      - name: Download & Extract Game Package
-        run: |
-          mkdir -p workspace/raw workspace/game ~/.switch
-          curl -L "${{ github.event.inputs.game_url }}" -o workspace/input.zip
-          unzip workspace/input.zip -d workspace/raw
-
-          PROD_KEYS=$(find workspace/raw -iname "*prod.keys*" | head -n 1)
-          if [ -n "$PROD_KEYS" ]; then
-            cp "$PROD_KEYS" ~/.switch/prod.keys
-            cp "$PROD_KEYS" workspace/prod.keys
-          fi
-
-          TITLE_KEYS=$(find workspace/raw -iname "*title.keys*" | head -n 1)
-          if [ -n "$TITLE_KEYS" ]; then
-            cp "$TITLE_KEYS" ~/.switch/title.keys
-          fi
-
-          find workspace/raw -not -path '*/.*' -type f \( -iname "*.nsp" -o -iname "*.nsz" -o -iname "*.xci" \) -exec cp {} workspace/game/ \;
-
-      # Cache nxnative shader and build folders
-      - name: Restore nxnative Build Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            workspace/game/*_build
-            nxnative_core/build
-          key: nxnative-${{ runner.os }}-${{ hashFiles('workspace/game/*.nsp') }}
-          restore-keys: |
-            nxnative-${{ runner.os }}-
-
-      - name: Run nxnative Build Script
+      - name: Protect sensitive inputs
         env:
-          ALLOW_OTHER_METAL: "1"
+          INPUT_URL: ${{ github.event.inputs.zip_url }}
         run: |
-          cd nxnative_core
-          python3 scripts/build_ipa_from_nsp.py ../workspace/game -k ../workspace/prod.keys --allow-other-metal
+          # Tells GitHub Actions runner to redact this string in all logs
+          echo "::add-mask::$INPUT_URL"
+          echo "DOWNLOAD_URL=$INPUT_URL" >> $GITHUB_ENV
 
-      - name: Locate Output IPA
-        id: find_ipa
+      - name: Install system dependencies
         run: |
-          IPA_FILE=$(find workspace nxnative_core -name "*.ipa" | head -n 1)
-          if [ -z "$IPA_FILE" ]; then
-            IPA_FILE=$(find . -name "*.ipa" | head -n 1)
-          fi
-          echo "Output IPA: $IPA_FILE"
-          echo "ipa_path=$IPA_FILE" >> $GITHUB_OUTPUT
+          brew install xcodegen zstd spirv-cross glslang dotnet-sdk
 
-      - name: Upload Output IPA
+      - name: Set up Python and toolchains
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install lz4 capstone fonttools backports.zstd nsz
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -downloadComponent MetalToolchain || true
+
+      - name: Download and unpack game files
+        run: |
+          mkdir -p input_files keys temp_zip
+
+          # $DOWNLOAD_URL is masked as *** in the console
+          curl -L "$DOWNLOAD_URL" -o temp_zip/package.zip
+          unzip temp_zip/package.zip -d temp_zip/extracted
+
+          find temp_zip/extracted -name "*.keys" -exec cp {} keys/prod.keys \;
+          find temp_zip/extracted -type f \( -name "*.nsp" -o -name "*.xci" -o -name "*.nsz" \) -exec cp {} input_files/ \;
+
+      - name: Execute nxnative conversion script
+        run: |
+          python3 scripts/build_ipa_from_nsp.py input_files -k keys/prod.keys
+
+      - name: Upload temporary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: built-ipa
-          path: ${{ steps.find_ipa.outputs.ipa_path }}
-          retention-days: 2
+          name: converted-game-ipa
+          path: "**/*.ipa"
+          retention-days: 1
