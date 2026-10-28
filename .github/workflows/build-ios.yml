@@ -19,32 +19,95 @@ jobs:
         env:
           INPUT_URL: ${{ github.event.inputs.zip_url }}
         run: |
-          # Tells GitHub Actions runner to redact this string in all logs
           echo "::add-mask::$INPUT_URL"
           echo "DOWNLOAD_URL=$INPUT_URL" >> $GITHUB_ENV
 
-      - name: Install system dependencies
-        run: |
-          brew install xcodegen zstd spirv-cross glslang dotnet-sdk
+      # -----------------------------------------------------------
+      # 1. CACHE HOMEBREW DOWNLOADS & TOOLS
+      # -----------------------------------------------------------
+      - name: Cache Homebrew Downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: ${{ runner.os }}-brew-v1
+          restore-keys: |
+            ${{ runner.os }}-brew-
 
-      - name: Set up Python and toolchains
+      - name: Setup System Dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+          HOMEBREW_NO_ENV_HINTS: 1
         run: |
-          python3 -m pip install --upgrade pip
-          pip3 install lz4 capstone fonttools backports.zstd nsz
+          # Only invoke brew if binaries are missing
+          MISSING_PKGS=""
+          for cmd in xcodegen zstd spirv-cross glslangValidator; do
+            if ! command -v "$cmd" &>/dev/null; then
+              MISSING_PKGS="$MISSING_PKGS $cmd"
+            fi
+          done
+
+          if [ -n "$MISSING_PKGS" ]; then
+            echo "Installing missing packages..."
+            brew install xcodegen zstd spirv-cross glslang
+          else
+            echo "All required system binaries found. Skipping Homebrew."
+          fi
+
+      # -----------------------------------------------------------
+      # 2. CACHE PYTHON PIP WHEELS
+      # -----------------------------------------------------------
+      - name: Cache Python Wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/pip
+          key: ${{ runner.os }}-pip-nxnative-v2
+          restore-keys: |
+            ${{ runner.os }}-pip-nxnative-
+
+      - name: Setup Python Environment
+        run: |
+          python3 -m pip install --upgrade --no-warn-script-location pip
+          pip3 install --no-warn-script-location lz4 capstone fonttools backports.zstd nsz
+
+      # -----------------------------------------------------------
+      # 3. CACHE METAL TOOLCHAIN (XCODE)
+      # -----------------------------------------------------------
+      - name: Cache Metal Toolchain
+        id: cache-metal
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/com.apple.dt.xcodebuild
+          key: ${{ runner.os }}-metal-toolchain-v2
+
+      - name: Configure Xcode & Metal
+        run: |
           sudo xcode-select -s /Applications/Xcode.app
-          xcodebuild -downloadComponent MetalToolchain || true
+          if [ "${{ steps.cache-metal.outputs.cache-hit }}" != "true" ]; then
+            xcodebuild -downloadComponent MetalToolchain || true
+          fi
 
+      # -----------------------------------------------------------
+      # 4. STREAM & EXTRACT GAME ARCHIVE
+      # -----------------------------------------------------------
       - name: Download and unpack game files
         run: |
           mkdir -p input_files keys temp_zip
 
-          # $DOWNLOAD_URL is masked as *** in the console
-          curl -L "$DOWNLOAD_URL" -o temp_zip/package.zip
-          unzip temp_zip/package.zip -d temp_zip/extracted
+          # Download using curl with connection reuse
+          curl -fSL "$DOWNLOAD_URL" -o temp_zip/package.zip
+
+          # Extract directly and clean up zip immediately to conserve RAM and disk IO
+          unzip -q temp_zip/package.zip -d temp_zip/extracted
+          rm -f temp_zip/package.zip
 
           find temp_zip/extracted -name "*.keys" -exec cp {} keys/prod.keys \;
           find temp_zip/extracted -type f \( -name "*.nsp" -o -name "*.xci" -o -name "*.nsz" \) -exec cp {} input_files/ \;
+          rm -rf temp_zip/extracted
 
+      # -----------------------------------------------------------
+      # 5. EXECUTE BUILD PIPELINE
+      # -----------------------------------------------------------
       - name: Execute nxnative conversion script
         run: |
           python3 scripts/build_ipa_from_nsp.py input_files -k keys/prod.keys
@@ -55,3 +118,4 @@ jobs:
           name: converted-game-ipa
           path: "**/*.ipa"
           retention-days: 1
+          compression-level: 0
