@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: 'Direct download URL for game ZIP archive'
+        description: 'Direct download URL (Gofile, Pixeldrain, Cloudflare Tunnel, or Raw ZIP)'
         required: true
         type: string
 
@@ -15,6 +15,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # -----------------------------------------------------------
+      # 1. MASK SENSITIVE INPUTS
+      # -----------------------------------------------------------
       - name: Protect sensitive inputs
         env:
           INPUT_URL: ${{ github.event.inputs.zip_url }}
@@ -23,7 +26,7 @@ jobs:
           echo "DOWNLOAD_URL=$INPUT_URL" >> $GITHUB_ENV
 
       # -----------------------------------------------------------
-      # 1. CACHE HOMEBREW DOWNLOADS & TOOLS
+      # 2. CACHE HOMEBREW DOWNLOADS & INSTALL TOOLS
       # -----------------------------------------------------------
       - name: Cache Homebrew Downloads
         uses: actions/cache@v4
@@ -39,7 +42,6 @@ jobs:
           HOMEBREW_NO_INSTALL_CLEANUP: 1
           HOMEBREW_NO_ENV_HINTS: 1
         run: |
-          # Only invoke brew if binaries are missing
           MISSING_PKGS=""
           for cmd in xcodegen zstd spirv-cross glslangValidator; do
             if ! command -v "$cmd" &>/dev/null; then
@@ -48,14 +50,13 @@ jobs:
           done
 
           if [ -n "$MISSING_PKGS" ]; then
-            echo "Installing missing packages..."
             brew install xcodegen zstd spirv-cross glslang
           else
-            echo "All required system binaries found. Skipping Homebrew."
+            echo "All required system binaries already present."
           fi
 
       # -----------------------------------------------------------
-      # 2. CACHE PYTHON PIP WHEELS
+      # 3. CACHE PYTHON WHEELS & INSTALL DEPENDENCIES
       # -----------------------------------------------------------
       - name: Cache Python Wheels
         uses: actions/cache@v4
@@ -67,11 +68,11 @@ jobs:
 
       - name: Setup Python Environment
         run: |
-          python3 -m pip install --upgrade --no-warn-script-location pip
-          pip3 install --no-warn-script-location lz4 capstone fonttools backports.zstd nsz
+          python3 -m pip install --upgrade --no-warn-script-location pip uv
+          pip3 install --no-warn-script-location lz4 capstone fonttools backports.zstd nsz requests
 
       # -----------------------------------------------------------
-      # 3. CACHE METAL TOOLCHAIN (XCODE)
+      # 4. CACHE XCODE METAL TOOLCHAIN
       # -----------------------------------------------------------
       - name: Cache Metal Toolchain
         id: cache-metal
@@ -88,30 +89,44 @@ jobs:
           fi
 
       # -----------------------------------------------------------
-      # 4. STREAM & EXTRACT GAME ARCHIVE
+      # 5. UNIVERSAL DOWNLOAD & EXTRACTION (GOFILE / PIXELDRAIN / DIRECT)
       # -----------------------------------------------------------
       - name: Download and unpack game files
         run: |
           mkdir -p input_files keys temp_zip
 
-          # Download using curl with connection reuse
-          curl -fSL "$DOWNLOAD_URL" -o temp_zip/package.zip
+          # Normalize Pixeldrain URLs automatically (converts /u/ to direct /api/file/)
+          CLEAN_URL=$(echo "$DOWNLOAD_URL" | sed 's|pixeldrain.com/u/|pixeldrain.com/api/file/|g')
 
-          # Extract directly and clean up zip immediately to conserve RAM and disk IO
-          unzip -q temp_zip/package.zip -d temp_zip/extracted
-          rm -f temp_zip/package.zip
+          if [[ "$CLEAN_URL" == *"gofile.io/d/"* ]]; then
+            echo "Detected Gofile folder link. Running automated downloader..."
+            export GF_DOWNLOAD_DIR="./temp_zip"
+            export GF_INTERACTIVE="0"
+            uv run --with requests --with tqdm https://raw.githubusercontent.com/ltsdw/gofile-downloader/main/gofile-downloader.py "$CLEAN_URL"
+          else
+            echo "Downloading direct archive stream..."
+            curl -fSL "$CLEAN_URL" -o temp_zip/package.zip
+          fi
 
-          find temp_zip/extracted -name "*.keys" -exec cp {} keys/prod.keys \;
-          find temp_zip/extracted -type f \( -name "*.nsp" -o -name "*.xci" -o -name "*.nsz" \) -exec cp {} input_files/ \;
-          rm -rf temp_zip/extracted
+          # Unpack any ZIP archives found in temp_zip
+          find temp_zip -name "*.zip" -exec unzip -q -o {} -d temp_zip/extracted \;
+          rm -rf temp_zip/*.zip
+
+          # Move keys and game files into working directories
+          find temp_zip -name "*.keys" -exec cp {} keys/prod.keys \;
+          find temp_zip -type f \( -name "*.nsp" -o -name "*.xci" -o -name "*.nsz" \) -exec cp {} input_files/ \;
+          rm -rf temp_zip
 
       # -----------------------------------------------------------
-      # 5. EXECUTE BUILD PIPELINE
+      # 6. RUN NXNATIVE CONVERSION
       # -----------------------------------------------------------
       - name: Execute nxnative conversion script
         run: |
           python3 scripts/build_ipa_from_nsp.py input_files -k keys/prod.keys
 
+      # -----------------------------------------------------------
+      # 7. EXPORT COMPILED IPA
+      # -----------------------------------------------------------
       - name: Upload temporary artifact
         uses: actions/upload-artifact@v4
         with:
