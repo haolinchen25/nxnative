@@ -14,13 +14,23 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - name: Checkout Fork
-        uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Clone nxnative Repository
+        run: |
+          git clone --recurse-submodules https://github.com/seedds/nxnative.git nxnative_core
+
+      # Cache Homebrew downloads to speed up dependency installs
+      - name: Cache Homebrew
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: ${{ runner.os }}-brew-${{ hashFiles('**/install') }}
+          restore-keys: |
+            ${{ runner.os }}-brew-
 
       - name: Install Toolchain & Dependencies
         run: |
@@ -35,7 +45,6 @@ jobs:
           curl -L "${{ github.event.inputs.game_url }}" -o workspace/input.zip
           unzip workspace/input.zip -d workspace/raw
 
-          # Copy keys to default switch directory and workspace
           PROD_KEYS=$(find workspace/raw -iname "*prod.keys*" | head -n 1)
           if [ -n "$PROD_KEYS" ]; then
             cp "$PROD_KEYS" ~/.switch/prod.keys
@@ -47,17 +56,30 @@ jobs:
             cp "$TITLE_KEYS" ~/.switch/title.keys
           fi
 
-          # Copy clean game files without macOS metadata files (__MACOSX)
           find workspace/raw -not -path '*/.*' -type f \( -iname "*.nsp" -o -iname "*.nsz" -o -iname "*.xci" \) -exec cp {} workspace/game/ \;
 
-      - name: Run Build Script
+      # Cache nxnative shader and build folders
+      - name: Restore nxnative Build Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            workspace/game/*_build
+            nxnative_core/build
+          key: nxnative-${{ runner.os }}-${{ hashFiles('workspace/game/*.nsp') }}
+          restore-keys: |
+            nxnative-${{ runner.os }}-
+
+      - name: Run nxnative Build Script
+        env:
+          ALLOW_OTHER_METAL: "1"
         run: |
-          python3 scripts/build_ipa_from_nsp.py workspace/game -k workspace/prod.keys --allow-other-metal
+          cd nxnative_core
+          python3 scripts/build_ipa_from_nsp.py ../workspace/game -k ../workspace/prod.keys --allow-other-metal
 
       - name: Locate Output IPA
         id: find_ipa
         run: |
-          IPA_FILE=$(find workspace -name "*.ipa" | head -n 1)
+          IPA_FILE=$(find workspace nxnative_core -name "*.ipa" | head -n 1)
           if [ -z "$IPA_FILE" ]; then
             IPA_FILE=$(find . -name "*.ipa" | head -n 1)
           fi
