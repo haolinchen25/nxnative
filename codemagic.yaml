@@ -5,13 +5,6 @@ workflows:
     instance_type: mac_mini_m2
     environment:
       xcode: latest
-      python: 3.12
-      vars:
-        # Define these in Codemagic UI (App settings > Environment variables)
-        # or replace them here with direct download links:
-        GAME_DOWNLOAD_URL: ""
-        UPDATE_DOWNLOAD_URL: ""
-        KEYS_DOWNLOAD_URL: ""
     scripts:
       - name: Install dependencies via Homebrew
         script: |
@@ -30,7 +23,7 @@ workflows:
           mkdir -p input_files
           mkdir -p keys
 
-          # Download files if environment variables are set
+          # Files are downloaded if variables are provided in Codemagic UI:
           if [ -n "$GAME_DOWNLOAD_URL" ]; then
             curl -L "$GAME_DOWNLOAD_URL" -o input_files/game.nsp
           fi
