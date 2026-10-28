@@ -1,1 +1,61 @@
+name: Build IPA in Fork
+
+on:
+  workflow_dispatch:
+    inputs:
+      game_url:
+        description: 'Direct download link to your game_input.zip'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Toolchain & Dependencies
+        run: |
+          brew install xcodegen zstd glslang
+          brew install --cask dotnet-sdk
+          pip install lz4 capstone fonttools "backports.zstd; python_version < '3.14'" nsz
+
+      - name: Download & Extract Game Files
+        run: |
+          mkdir -p workspace
+          curl -L "${{ github.event.inputs.game_url }}" -o workspace/game.zip
+          # Unpacks all files flat into workspace with no subdirectories
+          unzip -j workspace/game.zip -d workspace
+
+      - name: Clean Filenames
+        run: |
+          cd workspace
+          # Renames files to replace spaces with underscores
+          for f in *\ *; do [ -f "$f" ] && mv "$f" "${f// /_}"; done
+
+      - name: Run Build Script
+        run: |
+          python3 scripts/build_ipa_from_nsp.py workspace -k workspace/prod.keys
+
+      - name: Locate Output IPA
+        id: find_ipa
+        run: |
+          IPA_FILE=$(find workspace -name "*.ipa" | head -n 1)
+          echo "Output IPA: $IPA_FILE"
+          echo "ipa_path=$IPA_FILE" >> $GITHUB_OUTPUT
+
+      - name: Upload Output IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-ipa
+          path: ${{ steps.find_ipa.outputs.ipa_path }}
+          retention-days: 2
 
