@@ -1,1 +1,64 @@
-
+workflows:
+build-switch-ipa:
+name: Build Switch IPA with nxnative
+instance_type: mac_mini_m2
+max_build_duration: 60
+environment:
+vars:
+# Replace these URLs with direct download links (or pass as Codemagic Environment Variables)
+GAME_DOWNLOAD_URL: "https://your-direct-link.com/game.nsp"
+UPDATE_DOWNLOAD_URL: "https://your-direct-link.com/update.nsp"
+KEYS_DOWNLOAD_URL: "https://your-direct-link.com/prod.keys"
+xcode: latest
+node: latest
+scripts:
+- name: Install System Dependencies
+script: |
+echo "Installing toolchain binaries via Homebrew..."
+brew install xcodegen zstd spirv-cross glslang dotnet-sdk
+echo "Setting up Python environment..."
+python3 -m pip install --upgrade pip
+python3 -m pip install lz4 capstone fonttools backports.zstd nsz
+- name: Fetch Apple Metal Toolchain
+script: |
+echo "Ensuring Xcode Metal toolchain is downloaded and registered..."
+xcodebuild -downloadComponent MetalToolchain || true
+- name: Clone nxnative Repository
+script: |
+if [ ! -d "nxnative" ]; then
+git clone --recursive https://github.com/seedds/nxnative.git
+fi
+- name: Download Game Inputs & Keys
+script: |
+mkdir -p inputs
+# Download prod.keys
+echo "Downloading prod.keys..."
+curl -L -o inputs/prod.keys "$KEYS_DOWNLOAD_URL"
+# Download Base NSP/XCI
+echo "Downloading Game ROM..."
+curl -L -o inputs/game.nsp "$GAME_DOWNLOAD_URL"
+# Download optional update file if provided
+if [ -n "$UPDATE_DOWNLOAD_URL" ] && [ "$UPDATE_DOWNLOAD_URL" != "https://your-direct-link.com/update.nsp" ]; then
+echo "Downloading Game Update..."
+curl -L -o inputs/update.nsp "$UPDATE_DOWNLOAD_URL"
+fi
+- name: Run nxnative Build Script
+script: |
+cd nxnative
+# Output directory for the finished IPA
+mkdir -p ../output
+# Execute conversion driver
+python3 scripts/build_ipa_from_nsp.py ../inputs 
+-k ../inputs/prod.keys 
+-o ../output
+artifacts:
+- output/.ipa
+- nxnative/build/.ipa
+- "*.ipa"
+publishing:
+email:
+recipients:
+- your-email@example.com
+notify:
+success: true
+failure: true
