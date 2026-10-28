@@ -52,7 +52,7 @@ jobs:
 
       - name: Run Build Script
         run: |
-          python3 scripts/build_ipa_from_nsp.py workspace/game -k workspace/prod.keys
+          python3 scripts/build_ipa_from_nsp.py workspace/game -k workspace/prod.keys --allow-other-metal
 
       - name: Locate Output IPA
         id: find_ipa
